@@ -4,46 +4,57 @@ const app = express();
 const STEAM_KEY = process.env.STEAM_KEY;
 const STEAM_ID = process.env.STEAM_ID;
 
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const APPLICATION_ID = process.env.APPLICATION_ID;
+const USER_ID = process.env.USER_ID;
+
+// Steam API base
+const BASE_URL = "https://api.steampowered.com";
+
 // -------------------------
-// CACHE (60 seconds)
+// CACHE (60s Steam + Discord sync)
 // -------------------------
 let cache = null;
 let cacheTime = 0;
 
+// -------------------------
+// FETCH STEAM DATA
+// -------------------------
 async function fetchSteam() {
     const now = Date.now();
 
-    // refresh every 60 seconds
     if (cache && now - cacheTime < 60000) {
         return cache;
     }
 
     const [levelRes, profileRes, gamesRes, friendsRes, badgesRes] = await Promise.all([
-        fetch(`https://api.steampowered.com/IPlayerService/GetSteamLevel/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`),
+        fetch(`${BASE_URL}/IPlayerService/GetSteamLevel/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`),
 
-        fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${STEAM_KEY}&steamids=${STEAM_ID}`),
+        fetch(`${BASE_URL}/ISteamUser/GetPlayerSummaries/v2/?key=${STEAM_KEY}&steamids=${STEAM_ID}`),
 
-        fetch(`https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}&include_played_free_games=1&include_appinfo=1`),
+        fetch(`${BASE_URL}/IPlayerService/GetOwnedGames/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}&include_played_free_games=1&include_appinfo=1`),
 
-        fetch(`https://api.steampowered.com/ISteamUser/GetFriendList/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`),
+        fetch(`${BASE_URL}/ISteamUser/GetFriendList/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`),
 
-        fetch(`https://api.steampowered.com/IPlayerService/GetBadges/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`)
+        fetch(`${BASE_URL}/IPlayerService/GetBadges/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`)
     ]);
 
-    const level = await levelRes.json();
-    const profile = await profileRes.json();
-    const games = await gamesRes.json();
-    const friends = await friendsRes.json();
-    const badges = await badgesRes.json();
+    const data = {
+        level: await levelRes.json(),
+        profile: await profileRes.json(),
+        games: await gamesRes.json(),
+        friends: await friendsRes.json(),
+        badges: await badgesRes.json()
+    };
 
-    cache = { level, profile, games, friends, badges };
+    cache = data;
     cacheTime = now;
 
-    return cache;
+    return data;
 }
 
 // -------------------------
-// HELPERS
+// FORMAT DATE (May 20th)
 // -------------------------
 function formatDate(unix) {
     const d = new Date(unix * 1000);
@@ -60,121 +71,99 @@ function formatDate(unix) {
 }
 
 // -------------------------
-// LEVEL
+// DISCORD UPDATER LOOP
 // -------------------------
-app.get("/steam/level", async (req, res) => {
-    const data = await fetchSteam();
-    res.send(String(data.level.response.player_level));
-});
+async function updateDiscord() {
+    try {
+        const data = await fetchSteam();
 
-// -------------------------
-// PERSONA STATUS
-// -------------------------
-app.get("/steam/persona", async (req, res) => {
-    const data = await fetchSteam();
+        const level = data.level.response.player_level;
 
-    const state = data.profile.response.players[0].personastate;
+        const profile = data.profile.response.players[0];
+        const state = profile.personastate;
+        const lastSeen = formatDate(profile.lastlogoff);
 
-    const map = ["offline","online","busy","away","snooze","trade","play"];
-    res.send(map[state] || "unknown");
-});
+        const gamesOwned = data.games.response.game_count || 0;
 
-// -------------------------
-// LAST SEEN
-// -------------------------
-app.get("/steam/last_seen", async (req, res) => {
-    const data = await fetchSteam();
+        const totalMinutes = (data.games.response.games || [])
+            .reduce((sum, g) => sum + (g.playtime_forever || 0), 0);
 
-    const unix = data.profile.response.players[0].lastlogoff;
-    res.send(formatDate(unix));
-});
+        const hours = Math.floor(totalMinutes / 60);
+        const minutes = totalMinutes % 60;
 
-// -------------------------
-// ACCOUNT AGE
-// -------------------------
-app.get("/steam/account_age", async (req, res) => {
-    const data = await fetchSteam();
+        const friends = data.friends.friendslist?.friends?.length || 0;
 
-    const created = data.profile.response.players[0].timecreated;
-    const now = Math.floor(Date.now() / 1000);
+        const badges = data.badges.response.badges?.length || 0;
 
-    let days = Math.ceil((now - created) / 86400);
+        const now = Math.floor(Date.now() / 1000);
+        const created = profile.timecreated;
 
-    if (days < 7) return res.send(`${days}d`);
+        let days = Math.ceil((now - created) / 86400);
+        let age;
 
-    let weeks = Math.ceil(days / 7);
-    if (weeks < 52) return res.send(`${weeks}w`);
+        if (days < 7) age = `${days}d`;
+        else if (days < 52 * 7) age = `${Math.ceil(days / 7)}w`;
+        else age = `${Math.ceil(days / 365)}y`;
 
-    let years = Math.ceil(weeks / 52);
-    return res.send(`${years}y`);
-});
+        const body = {
+            data: {
+                dynamic: [
+                    { type: 1, name: "level", value: String(level) },
+                    { type: 1, name: "status", value: ["offline","online","busy","away","snooze","trade","play"][state] || "unknown" },
+                    { type: 1, name: "owned", value: String(gamesOwned) },
+                    { type: 1, name: "playtime", value: `${hours}h ${minutes}m` },
+                    { type: 1, name: "last_seen", value: lastSeen },
+                    { type: 1, name: "age", value: age },
+                    { type: 1, name: "badges", value: String(badges) },
+                    { type: 1, name: "friends", value: String(friends) }
+                ]
+            }
+        };
 
-// -------------------------
-// TOTAL PLAYTIME
-// -------------------------
-app.get("/steam/total_playtime", async (req, res) => {
-    const data = await fetchSteam();
+        await fetch(
+            `https://discord.com/api/v9/applications/${APPLICATION_ID}/users/${USER_ID}/identities/0/profile`,
+            {
+                method: "PATCH",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bot ${DISCORD_TOKEN}`
+                },
+                body: JSON.stringify(body)
+            }
+        );
 
-    const totalMinutes = data.games.response.games
-        .reduce((sum, g) => sum + (g.playtime_forever || 0), 0);
+        console.log("Discord profile updated");
 
-    const hours = Math.floor(totalMinutes / 60);
-    const minutes = totalMinutes % 60;
-
-    res.send(`${hours}h ${minutes}m`);
-});
-
-// -------------------------
-// RECENT 2 WEEKS
-// -------------------------
-app.get("/steam/recent_2w_hours", async (req, res) => {
-    const data = await fetchSteam();
-
-    const totalMinutes = data.games.response.games
-        .reduce((sum, g) => sum + (g.playtime_2weeks || 0), 0);
-
-    const hours = Math.round(totalMinutes / 60);
-
-    res.send(String(hours));
-});
+    } catch (err) {
+        console.error("Update failed:", err);
+    }
+}
 
 // -------------------------
-// 🎮 NEW: GAMES OWNED
+// START SERVER (optional API access)
 // -------------------------
-app.get("/steam/games_owned", async (req, res) => {
+app.get("/steam/:stat", async (req, res) => {
     const data = await fetchSteam();
 
-    const count = data.games.response.game_count || 0;
+    const stat = req.params.stat;
 
-    res.send(String(count));
+    const profile = data.profile.response.players[0];
+
+    const map = {
+        level: data.level.response.player_level,
+        friends: data.friends.friendslist?.friends?.length || 0,
+        badges: data.badges.response.badges?.length || 0,
+        owned: data.games.response.game_count || 0
+    };
+
+    res.send(String(map[stat] ?? "unknown"));
 });
 
-// -------------------------
-// 👥 NEW: FRIENDS COUNT
-// -------------------------
-app.get("/steam/friends", async (req, res) => {
-    const data = await fetchSteam();
-
-    const count = data.friends.friendslist?.friends?.length || 0;
-
-    res.send(String(count));
-});
-
-// -------------------------
-// BADGES (already cached, now exposed)
-// -------------------------
-app.get("/steam/badges", async (req, res) => {
-    const data = await fetchSteam();
-
-    const count = data.badges.response.badges?.length || 0;
-
-    res.send(String(count));
-});
-
-// -------------------------
-// START SERVER
-// -------------------------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log("Steam API running on port", PORT);
-});
+app.listen(PORT, () => console.log("Steam + Discord service running"));
+
+// -------------------------
+// RUN LOOP (EVERY 60 SECONDS)
+// -------------------------
+updateDiscord();
+setInterval(updateDiscord, 60000);
