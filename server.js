@@ -1,8 +1,8 @@
 const express = require("express");
 const app = express();
 
-const STEAM_KEY = process.env.39CE68E3368C3C864C41E5094EC4DAB2;
-const STEAM_ID = process.env.76561199555932921;
+const STEAM_KEY = process.env.STEAM_KEY;
+const STEAM_ID = process.env.STEAM_ID;
 
 // LEVEL
 app.get("/steam/level", async (req, res) => {
