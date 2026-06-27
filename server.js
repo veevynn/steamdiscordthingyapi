@@ -8,17 +8,16 @@ const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const APPLICATION_ID = process.env.APPLICATION_ID;
 const USER_ID = process.env.USER_ID;
 
-// Steam API base
 const BASE_URL = "https://api.steampowered.com";
 
 // -------------------------
-// CACHE (60s Steam + Discord sync)
+// CACHE (60 seconds)
 // -------------------------
 let cache = null;
 let cacheTime = 0;
 
 // -------------------------
-// FETCH STEAM DATA
+// FETCH ALL STEAM DATA
 // -------------------------
 async function fetchSteam() {
     const now = Date.now();
@@ -27,7 +26,14 @@ async function fetchSteam() {
         return cache;
     }
 
-    const [levelRes, profileRes, gamesRes, friendsRes, badgesRes] = await Promise.all([
+    const [
+        levelRes,
+        profileRes,
+        gamesRes,
+        friendsRes,
+        badgesRes,
+        recentRes
+    ] = await Promise.all([
         fetch(`${BASE_URL}/IPlayerService/GetSteamLevel/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`),
 
         fetch(`${BASE_URL}/ISteamUser/GetPlayerSummaries/v2/?key=${STEAM_KEY}&steamids=${STEAM_ID}`),
@@ -36,21 +42,22 @@ async function fetchSteam() {
 
         fetch(`${BASE_URL}/ISteamUser/GetFriendList/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`),
 
-        fetch(`${BASE_URL}/IPlayerService/GetBadges/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`)
+        fetch(`${BASE_URL}/IPlayerService/GetBadges/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`),
+
+        fetch(`${BASE_URL}/IPlayerService/GetRecentlyPlayedGames/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`)
     ]);
 
-    const data = {
+    cache = {
         level: await levelRes.json(),
         profile: await profileRes.json(),
         games: await gamesRes.json(),
         friends: await friendsRes.json(),
-        badges: await badgesRes.json()
+        badges: await badgesRes.json(),
+        recent: await recentRes.json()
     };
 
-    cache = data;
     cacheTime = now;
-
-    return data;
+    return cache;
 }
 
 // -------------------------
@@ -77,13 +84,13 @@ async function updateDiscord() {
     try {
         const data = await fetchSteam();
 
+        const profile = data.profile.response.players[0];
+
         const level = data.level.response.player_level;
 
-        const profile = data.profile.response.players[0];
         const state = profile.personastate;
-        const lastSeen = formatDate(profile.lastlogoff);
 
-        const gamesOwned = data.games.response.game_count || 0;
+        const gamesOwned = (data.games.response.games || []).length;
 
         const totalMinutes = (data.games.response.games || [])
             .reduce((sum, g) => sum + (g.playtime_forever || 0), 0);
@@ -95,16 +102,41 @@ async function updateDiscord() {
 
         const badges = data.badges.response.badges?.length || 0;
 
+        // -------------------------
+        // RECENT 2 WEEKS FIX
+        // -------------------------
+        const recentMinutes = (data.recent.response.games || [])
+            .reduce((sum, g) => sum + (g.playtime_2weeks || 0), 0);
+
+        const recentHours = Math.round(recentMinutes / 60);
+
+        // -------------------------
+        // ACCOUNT AGE FIX
+        // -------------------------
         const now = Math.floor(Date.now() / 1000);
         const created = profile.timecreated;
 
-        let days = Math.ceil((now - created) / 86400);
+        const days = Math.floor((now - created) / 86400);
+        const weeks = Math.floor(days / 7);
+
         let age;
 
-        if (days < 7) age = `${days}d`;
-        else if (days < 52 * 7) age = `${Math.ceil(days / 7)}w`;
-        else age = `${Math.ceil(days / 365)}y`;
+        if (weeks < 1) {
+            age = `${days}d`;
+        } else if (weeks < 52) {
+            age = `${weeks}w`;
+        } else {
+            const years = Math.floor(weeks / 52);
+            const remainingWeeks = weeks % 52;
 
+            age = remainingWeeks > 0
+                ? `${years}y ${remainingWeeks}w`
+                : `${years}y`;
+        }
+
+        // -------------------------
+        // DISCORD PAYLOAD
+        // -------------------------
         const body = {
             data: {
                 dynamic: [
@@ -112,7 +144,8 @@ async function updateDiscord() {
                     { type: 1, name: "status", value: ["offline","online","busy","away","snooze","trade","play"][state] || "unknown" },
                     { type: 1, name: "owned", value: String(gamesOwned) },
                     { type: 1, name: "playtime", value: `${hours}h ${minutes}m` },
-                    { type: 1, name: "last_seen", value: lastSeen },
+                    { type: 1, name: "last_seen", value: formatDate(profile.lastlogoff) },
+                    { type: 1, name: "recent", value: String(recentHours) },
                     { type: 1, name: "age", value: age },
                     { type: 1, name: "badges", value: String(badges) },
                     { type: 1, name: "friends", value: String(friends) }
@@ -132,7 +165,7 @@ async function updateDiscord() {
             }
         );
 
-        console.log("Discord profile updated");
+        console.log("Updated Discord profile");
 
     } catch (err) {
         console.error("Update failed:", err);
@@ -140,30 +173,28 @@ async function updateDiscord() {
 }
 
 // -------------------------
-// START SERVER (optional API access)
+// OPTIONAL API ROUTES
 // -------------------------
 app.get("/steam/:stat", async (req, res) => {
     const data = await fetchSteam();
-
-    const stat = req.params.stat;
-
     const profile = data.profile.response.players[0];
 
-    const map = {
+    const stats = {
         level: data.level.response.player_level,
         friends: data.friends.friendslist?.friends?.length || 0,
         badges: data.badges.response.badges?.length || 0,
-        owned: data.games.response.game_count || 0
+        owned: (data.games.response.games || []).length
     };
 
-    res.send(String(map[stat] ?? "unknown"));
+    res.send(String(stats[req.params.stat] ?? "unknown"));
 });
 
+// -------------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Steam + Discord service running"));
 
 // -------------------------
-// RUN LOOP (EVERY 60 SECONDS)
+// START LOOP (60s)
 // -------------------------
 updateDiscord();
 setInterval(updateDiscord, 60000);
