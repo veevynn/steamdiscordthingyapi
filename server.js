@@ -5,7 +5,7 @@ const STEAM_KEY = process.env.STEAM_KEY;
 const STEAM_ID = process.env.STEAM_ID;
 
 // -------------------------
-// Simple cache (60s)
+// CACHE (60 seconds)
 // -------------------------
 let cache = null;
 let cacheTime = 0;
@@ -13,30 +13,37 @@ let cacheTime = 0;
 async function fetchSteam() {
     const now = Date.now();
 
+    // refresh every 60 seconds
     if (cache && now - cacheTime < 60000) {
         return cache;
     }
 
-    const [levelRes, profileRes, gamesRes] = await Promise.all([
+    const [levelRes, profileRes, gamesRes, friendsRes, badgesRes] = await Promise.all([
         fetch(`https://api.steampowered.com/IPlayerService/GetSteamLevel/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`),
 
         fetch(`https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${STEAM_KEY}&steamids=${STEAM_ID}`),
 
-        fetch(`https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}&include_played_free_games=1&include_appinfo=1`)
+        fetch(`https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}&include_played_free_games=1&include_appinfo=1`),
+
+        fetch(`https://api.steampowered.com/ISteamUser/GetFriendList/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`),
+
+        fetch(`https://api.steampowered.com/IPlayerService/GetBadges/v1/?key=${STEAM_KEY}&steamid=${STEAM_ID}`)
     ]);
 
     const level = await levelRes.json();
     const profile = await profileRes.json();
     const games = await gamesRes.json();
+    const friends = await friendsRes.json();
+    const badges = await badgesRes.json();
 
-    cache = { level, profile, games };
+    cache = { level, profile, games, friends, badges };
     cacheTime = now;
 
     return cache;
 }
 
 // -------------------------
-// Helpers
+// HELPERS
 // -------------------------
 function formatDate(unix) {
     const d = new Date(unix * 1000);
@@ -73,7 +80,7 @@ app.get("/steam/persona", async (req, res) => {
 });
 
 // -------------------------
-// LAST SEEN (formatted date)
+// LAST SEEN
 // -------------------------
 app.get("/steam/last_seen", async (req, res) => {
     const data = await fetchSteam();
@@ -83,7 +90,7 @@ app.get("/steam/last_seen", async (req, res) => {
 });
 
 // -------------------------
-// ACCOUNT AGE (rounded: d → w → y)
+// ACCOUNT AGE
 // -------------------------
 app.get("/steam/account_age", async (req, res) => {
     const data = await fetchSteam();
@@ -103,7 +110,7 @@ app.get("/steam/account_age", async (req, res) => {
 });
 
 // -------------------------
-// TOTAL PLAYTIME (hours + minutes)
+// TOTAL PLAYTIME
 // -------------------------
 app.get("/steam/total_playtime", async (req, res) => {
     const data = await fetchSteam();
@@ -118,7 +125,7 @@ app.get("/steam/total_playtime", async (req, res) => {
 });
 
 // -------------------------
-// RECENT 2 WEEKS (best effort)
+// RECENT 2 WEEKS
 // -------------------------
 app.get("/steam/recent_2w_hours", async (req, res) => {
     const data = await fetchSteam();
@@ -129,6 +136,39 @@ app.get("/steam/recent_2w_hours", async (req, res) => {
     const hours = Math.round(totalMinutes / 60);
 
     res.send(String(hours));
+});
+
+// -------------------------
+// 🎮 NEW: GAMES OWNED
+// -------------------------
+app.get("/steam/games_owned", async (req, res) => {
+    const data = await fetchSteam();
+
+    const count = data.games.response.game_count || 0;
+
+    res.send(String(count));
+});
+
+// -------------------------
+// 👥 NEW: FRIENDS COUNT
+// -------------------------
+app.get("/steam/friends", async (req, res) => {
+    const data = await fetchSteam();
+
+    const count = data.friends.friendslist?.friends?.length || 0;
+
+    res.send(String(count));
+});
+
+// -------------------------
+// BADGES (already cached, now exposed)
+// -------------------------
+app.get("/steam/badges", async (req, res) => {
+    const data = await fetchSteam();
+
+    const count = data.badges.response.badges?.length || 0;
+
+    res.send(String(count));
 });
 
 // -------------------------
